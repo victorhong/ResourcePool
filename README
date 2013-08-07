@@ -1,0 +1,66 @@
+Resource Pool Class
+
+Design Rational:
+
+Since acquire() and release() are most performed operations, and we can not assume that pool size will be small, it make sense to use a LinkedList (queue) field availableReouces to track available resources, and a Hashtable field acquiredResources  to track resources that has been acquired. This way acquire() method can poll the first resource on the field availableResources, and release() method can find the resource to be released from the field acquiredResources in constant time. 
+
+To implement  removeNow() method, we need to make attempt to interrupt the thread which are using some resources at the time. This mean that when a resource being acquired, we need to track which thread acquired  the resource, so that it can be interrupted if needed when removeNow() is called on this resource. Therefore the field acquiredResources is a Hashtable<T, Thread>, where each resource T and thread that acquired it are stored together as a pair.
+
+To implement closeNow(), we need to track those acquired resources that were to be removed but were waiting for threads using those resources to release them, so that we can interrupt those threads that are still using those resources. The Hashtable<T, Thread> removeList is for this purpose. It contains pairs of a resource to be removed, and the thread that are using it.
+
+We need protect these fields from concurrent changes, a lock is used to synchronize the change of availableResources, acquiredResources, and removeList. All changes to these fields are done after locking succeeded.
+
+ReentrantLock gives us the ability to back out of an action of acquiring a lock with a timeout. We need this in order to implement acquire(long timeout, TimeUnit unit).
+
+Reentrant lock has lockInterruptibly() method, we can use it acquire(). In highly contested environment, threads may get suspended while waiting for a lock. Using lockInerruptibly() will allow the threads waiting for lock to acquire resource to be interrupted if needed.
+
+In release() method, lock() is used to give the thread a better chance to release the resource without being interrupted at locking stage.
+
+In add() and remove() methods, lock() is used because these methods are not frequently used.
+
+In removeNow() and closeNow(), we are taking advantage of tryLock() "barging" feature , to acquire lock ahead of other waiting threads even when fairness is specified.
+
+Two sets of conditions were specified:  resourceAvailable and resourceRemove. In Acquire() and Acquire(timeout, unit), when a thread try to acquire a resource when no resource available, it will wait on resourceAvailable condition. In remove(), when a thread try to remove a resource that is being used by another thread, it will wait on resourceRemove condition. In release() method, when a resource becomes available, only those threads that waiting for acquiring a resource will be signaled. When a thread release a resource, and the resource was removed by a thread waiting, only those threads that waiting for removing a resource will be signaled. Separating these two waiting conditions gives us ability not to wake up threads which are not waiting for the condition.
+
+In the remove() and removeNow() methods, we allow the same thread to acquire a resource and remove the resource from the pool (see the line 'if (t == Thread.currentThread()) return true;' ). The alternative is to throw an exception to make sure that caller is truly intend to do so.
+
+AtomicBoolean is used for the field open, so that no locking is needed when calling isOpen(). Similarly, AtomicInteger is used for the field resourceCount, so that no locking is needed when calling size(). However, setting of resourceCount do require lock in order exclusively access of fields availableResources and acquiredResources.
+
+Improvement Idea:
+
+One improvement of this class could be allowing user to pass in a resource factory and automatically increase the resource pool without explicitly calling add(). 
+
+Thread Safety:
+
+The class is considered thread safe because of the following reasons:
+1) all data member are private and final
+2) no direct "setter" method available to callers
+3) no reference to mutable objects are exposed
+4) methods modify fields (except open)  are synchronized using lock. 
+5) the open flag synchronization is provided with AtomicBoolean
+6) the class is final, so no subclass can overriding the method defined
+
+
+Testing:
+
+To make sure that the class works, I made some tests. These are not intent to be comprehensive, but to demonstrate that key features are working.
+
+These tests make use of a resource pool of 'named buffers'. Each named buffer is a pair consists of a string for name, and a StringBuffer for buffer space. 
+
+I created a MessageWriter class as a producer, and MessageReader class as a consumer. A MessageWriter thread will make a number of attempts to acquire a buffer from the given buffer pool. With each attempt, after acquired a buffer,  the MessageWriter thread will  write a message to the buffer if buffer is empty, and will hold on to the buffer for a specified time then release it. It will wait for a specified time before the next write attempt. If the buffer is not empty (previous message has not been cleared by any reader), writer will wait for the next attempt to write.
+
+A MessageReader thread will make a number of attempts to read from buffers from the given buffer pool. With each attempt, after acquired a buffer,  the MessageReader thread will  read a message from the buffer if buffer is not empty, and will hold on to the buffer for a specified time then release it. It will wait for a specified time before making  the next read attempt. If the buffer is empty, it will wait for the next attempt to read
+
+The testProducerConsumer() function is to demonstrate that the ResourcePool class can be used to construct a buffer pool and the buffer pool can be used by a set of producer threads to send messages to a set of consumer threads. It can simulate different multi-thread producer/consumer environment by specifying different parameters, such as number of producer thread, number of consumer threads, number of buffers in buffer pool, etc.
+
+The function first creates a number of buffers specified by numOfBuffers, adding them to buffer pool bp. 
+
+Next, it then create a number of MessageWriter threads according to specified numOfMessageWriters. Each MessageWriter thread is added to writerThreads for tracking and for each such thread there is a counter added to writeAttemptCounts for tracking the write attempt of the thread.
+
+Next, it then create a number of MessageReader threads according to specified numOfMessageReaders. Each MessageReader thread is added to readerThreads list for tracking and for each such thread there is a counter added to readAttemptCounts for tracking the read attempt of the thread.
+
+The function then make a number of loops. In each loop, it will wait a some time, then it will get the number of write attempts made by each MessageWriter thread so far, and store it in the corresponding wrteAttemptCounts element. It will also calculate write attempt count increase for each MessageWriter thread during current loop. If the increase is greater than 0, then the MessageWriter thread has not been starved, blocked or deadlocked in this loop. Similarly, It will also calculate read attempt count increase for each MessageReader thread during current loop. If the increase is greater than 0, then the MessageReader thread has not been starved, blocked or deadlocked in this loop.
+
+In testRun1() and testRun2(), we show that by specifying different test configurations, we can automatically test a set simulated multi-threaded environments that we are targeting for. This can potently give us confidence in thread safety as well as performance of the given environments.
+
+
